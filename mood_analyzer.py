@@ -2,152 +2,136 @@
 """
 Rule based mood analyzer for short text snippets.
 
-This class starts with very simple logic:
-  - Preprocess the text
-  - Look for positive and negative words
-  - Compute a numeric score
-  - Convert that score into a mood label
+Flow:
+  preprocess(text) -> tokens
+  score_text(text) -> single numeric score (positive minus negative)
+  predict_label(text) -> "positive" / "negative" / "neutral" / "mixed"
 """
 
-from typing import List, Dict, Tuple, Optional
+import re
+import string
+from typing import List, Optional, Tuple
 
 from dataset import POSITIVE_WORDS, NEGATIVE_WORDS
 
 
+# --- Signals that aren't plain dictionary words --------------------------
+EMOJI_SCORES = {
+    "🙂": +1, "😂": +2, "❤️": +2, "🥳": +2, "🔥": +2, "👍": +1,
+    "😭": -2, "😡": -2, "👎": -2, "🙁": -1,
+    "💀": +1,   # slang "I'm dead" = hilarious (deliberately ambiguous)
+    "🥲": -1,   # bittersweet, leaning negative
+    ":)": +1, ":-)": +1, ":(": -1, ":-(": -1,
+}
+SLANG_SCORES = {
+    "lol": +1, "lmao": +1, "slaps": +2, "fire": +2, "goated": +2,
+    "meh": -1, "ugh": -1, "sucks": -2,
+}
+# Words stronger than the default +/-1.
+WEIGHTS = {
+    "love": 2, "amazing": 2, "awesome": 2, "proud": 2,
+    "hate": 2, "terrible": 2, "awful": 2, "exhausted": 2,
+}
+NEGATORS = {"not", "no", "never", "dont", "don't", "aint", "ain't",
+            "cant", "can't", "isnt", "isn't", "wasnt", "wasn't"}
+
+
 class MoodAnalyzer:
-    """
-    A very simple, rule based mood classifier.
-    """
+    """A very simple, rule based mood classifier."""
 
     def __init__(
         self,
         positive_words: Optional[List[str]] = None,
         negative_words: Optional[List[str]] = None,
     ) -> None:
-        # Use the default lists from dataset.py if none are provided.
         positive_words = positive_words if positive_words is not None else POSITIVE_WORDS
         negative_words = negative_words if negative_words is not None else NEGATIVE_WORDS
-
-        # Store as sets for faster lookup.
         self.positive_words = set(w.lower() for w in positive_words)
         self.negative_words = set(w.lower() for w in negative_words)
 
     # ---------------------------------------------------------------------
     # Preprocessing
     # ---------------------------------------------------------------------
-
     def preprocess(self, text: str) -> List[str]:
         """
-        Convert raw text into a list of tokens the model can work with.
-
-        TODO: Improve this method.
-
-        Right now, it does the minimum:
-          - Strips leading and trailing whitespace
-          - Converts everything to lowercase
-          - Splits on spaces
-
-        Ideas to improve:
-          - Remove punctuation
-          - Handle simple emojis separately (":)", ":-(", "🥲", "😂")
-          - Normalize repeated characters ("soooo" -> "soo")
+        Lowercase, pull emojis/emoticons out as their own tokens, strip
+        punctuation off words, and collapse elongated chars ("soooo" -> "soo").
         """
-        cleaned = text.strip().lower()
-        tokens = cleaned.split()
-
+        text = text.strip().lower()
+        tokens: List[str] = []
+        for raw in text.split():
+            if raw in EMOJI_SCORES:          # whole token is an emoticon like ":)"
+                tokens.append(raw)
+                continue
+            for ch in raw:                   # peel unicode emoji off a word
+                if ch in EMOJI_SCORES:
+                    tokens.append(ch)
+            word = raw.strip(string.punctuation)
+            word = re.sub(r"(.)\1{2,}", r"\1\1", word)
+            if word:
+                tokens.append(word)
         return tokens
 
     # ---------------------------------------------------------------------
-    # Scoring logic
+    # Per-token value + (positive, negative) mass
     # ---------------------------------------------------------------------
+    def _token_value(self, token: str) -> int:
+        if token in EMOJI_SCORES:
+            return EMOJI_SCORES[token]
+        if token in SLANG_SCORES:
+            return SLANG_SCORES[token]
+        if token in self.positive_words:
+            return WEIGHTS.get(token, 1)
+        if token in self.negative_words:
+            return -WEIGHTS.get(token, 1)
+        return 0
 
+    def _score_components(self, text: str) -> Tuple[int, int]:
+        """Return (positive_mass, negative_mass), each >= 0, with negation handled."""
+        tokens = self.preprocess(text)
+        pos, neg = 0, 0
+        negate = False
+        for tok in tokens:
+            if tok in NEGATORS:
+                negate = True
+                continue
+            val = self._token_value(tok)
+            if negate:
+                val = -val              # flip ONLY the immediately next token
+                negate = False          # then reset (avoids "no cap" bleeding into 🔥)
+            if val > 0:
+                pos += val
+            elif val < 0:
+                neg += -val
+        return pos, neg
+
+    # ---------------------------------------------------------------------
+    # Scoring  (enhancement: negation + weighting + emoji/slang signals)
+    # ---------------------------------------------------------------------
     def score_text(self, text: str) -> int:
-        """
-        Compute a numeric "mood score" for the given text.
-
-        Positive words increase the score.
-        Negative words decrease the score.
-
-        TODO: You must choose AT LEAST ONE modeling improvement to implement.
-        For example:
-          - Handle simple negation such as "not happy" or "not bad"
-          - Count how many times each word appears instead of just presence
-          - Give some words higher weights than others (for example "hate" < "annoyed")
-          - Treat emojis or slang (":)", "lol", "💀") as strong signals
-        """
-        # TODO: Implement this method.
-        #   1. Call self.preprocess(text) to get tokens.
-        #   2. Loop over the tokens.
-        #   3. Increase the score for positive words, decrease for negative words.
-        #   4. Return the total score.
-        #
-        # Hint: if you implement negation, you may want to look at pairs of tokens,
-        # like ("not", "happy") or ("never", "fun").
-        pass
+        """Single numeric mood score: positive mass minus negative mass."""
+        pos, neg = self._score_components(text)
+        return pos - neg
 
     # ---------------------------------------------------------------------
-    # Label prediction
+    # Label
     # ---------------------------------------------------------------------
-
     def predict_label(self, text: str) -> str:
         """
-        Turn the numeric score for a piece of text into a mood label.
-
-        The default mapping is:
-          - score > 0  -> "positive"
-          - score < 0  -> "negative"
-          - score == 0 -> "neutral"
-
-        TODO: You can adjust this mapping if it makes sense for your model.
-        For example:
-          - Use different thresholds (for example score >= 2 to be "positive")
-          - Add a "mixed" label for scores close to zero
-        Just remember that whatever labels you return should match the labels
-        you use in TRUE_LABELS in dataset.py if you care about accuracy.
+        Map the score to a label. A single scalar can't tell 'neutral' from
+        'mixed', so we also check whether BOTH sides fired.
         """
-        # TODO: Implement this method.
-        #   1. Call self.score_text(text) to get the numeric score.
-        #   2. Return "positive" if the score is above 0.
-        #   3. Return "negative" if the score is below 0.
-        #   4. Return "neutral" otherwise.
-        pass
+        score = self.score_text(text)               # the stub's numeric score
+        pos, neg = self._score_components(text)      # to distinguish mixed
+        if pos >= 1 and neg >= 1:
+            return "mixed"
+        if score > 0:
+            return "positive"
+        if score < 0:
+            return "negative"
+        return "neutral"
 
     # ---------------------------------------------------------------------
-    # Explanations (optional but recommended)
-    # ---------------------------------------------------------------------
-
     def explain(self, text: str) -> str:
-        """
-        Return a short string explaining WHY the model chose its label.
-
-        TODO:
-          - Look at the tokens and identify which ones counted as positive
-            and which ones counted as negative.
-          - Show the final score.
-          - Return a short human readable explanation.
-
-        Example explanation (your exact wording can be different):
-          'Score = 2 (positive words: ["love", "great"]; negative words: [])'
-
-        The current implementation is a placeholder so the code runs even
-        before you implement it.
-        """
-        tokens = self.preprocess(text)
-
-        positive_hits: List[str] = []
-        negative_hits: List[str] = []
-        score = 0
-
-        for token in tokens:
-            if token in self.positive_words:
-                positive_hits.append(token)
-                score += 1
-            if token in self.negative_words:
-                negative_hits.append(token)
-                score -= 1
-
-        return (
-            f"Score = {score} "
-            f"(positive: {positive_hits or '[]'}, "
-            f"negative: {negative_hits or '[]'})"
-        )
+        pos, neg = self._score_components(text)
+        return f"Score = {pos - neg} (pos_mass={pos}, neg_mass={neg}) -> {self.predict_label(text)}"
